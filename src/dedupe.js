@@ -57,7 +57,7 @@ export class DedupeStore {
    * @param {number} [opts.retentionMs] 已见消息 / 已结束 claim 的保留窗口，超过才可清理
    * @param {() => number} [opts.now] 时钟函数，可注入假时钟便于测试
    * @param {number} [opts.initialLeaseSeq=0] leaseId 起始值；进程重启时传入上次持久化的
-   *   序号，避免编号回退（P0'-1）
+   *   序号，避免编号回退（P0'-1）。必须是安全正整数，否则回落 0
    */
   constructor({
     leaseMs = 30_000,
@@ -81,8 +81,12 @@ export class DedupeStore {
      * 注意：它只在**进程内**单调。进程重启后内存归零，所以本类不假装自己能跨
      * 重启保证单调——调用方应当把 leaseSeq 持久化，重启时用 initialLeaseSeq 回填。
      * 不做持久化就等于放弃 fencing 语义，此时 leaseId 只能当进程内的递增计数看。
+     *
+     * 用 isSafeInteger 而不是 isInteger：超过 MAX_SAFE_INTEGER 之后 ++ 不再改变
+     * 数值（1e20 + 1 === 1e20），计数器会静默停住，单调性当场失效。宁可回落 0
+     * 也不要接受一个注定不再递增的起点。
      */
-    this.leaseSeq = Number.isInteger(initialLeaseSeq) && initialLeaseSeq > 0 ? initialLeaseSeq : 0;
+    this.leaseSeq = Number.isSafeInteger(initialLeaseSeq) && initialLeaseSeq > 0 ? initialLeaseSeq : 0;
   }
 
   // ---------- 消息级去重 ----------

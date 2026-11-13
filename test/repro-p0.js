@@ -330,6 +330,40 @@ test("P0'-1b leaseId 序号可以被读出，供外部持久化", () => {
   assert.equal(d.leaseSeq, 2, 'leaseSeq 应可直接读出，供调用方持久化后回填');
 });
 
+// 复审（MiMo #205）要求补齐 initialLeaseSeq 的非法边界：0 / 负数 / 非整数
+// 都必须回落 0，首个 leaseId=1；合法值则从其后续上，不回退也不跳号。
+test("P0'-1c initialLeaseSeq 非法值回落 0，合法值精确续号", () => {
+  const clock = () => 1_000_000;
+  const bad = [0, -1, -100, 1.5, NaN, Infinity, '7', null, {}];
+  for (const value of bad) {
+    const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: value });
+    const first = d.claim(`t-p0p-1g-${String(value)}`, { agentId: 'ag', runId: 'r1' });
+    assert.equal(first.leaseId, 1, `initialLeaseSeq=${String(value)} 应回落 0，首个 leaseId 为 1`);
+  }
+
+  // 合法起点：正好续上，不跳号（7 -> 8）
+  const resumed = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: 7 });
+  assert.equal(resumed.claim('t-p0p-1h', { agentId: 'ag', runId: 'r1' }).leaseId, 8);
+});
+
+// 超过 MAX_SAFE_INTEGER 的起点必须拒绝：那儿 ++ 不再改变数值（1e20 + 1 === 1e20），
+// 计数器会静默停住，单调性失效。这正是 leaseId 存在的唯一理由，所以宁可回落 0。
+test("P0'-1d initialLeaseSeq 超过安全整数时必须拒绝，不能接受一个不再递增的起点", () => {
+  const clock = () => 1_000_000;
+  const unsafe = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: 1e20 });
+  assert.equal(unsafe.leaseSeq, 0, '不安全整数应回落 0');
+  const first = unsafe.claim('t-p0p-1i', { agentId: 'ag', runId: 'r1' }).leaseId;
+  assert.equal(first, 1);
+
+  // 前置确认这个前提属实，免得用例变成空转
+  assert.equal(1e20 + 1, 1e20, '前提：超过 MAX_SAFE_INTEGER 后 ++ 不再改变数值');
+  const maxSafe = new DedupeStore({
+    leaseMs: 60_000, now: clock, initialLeaseSeq: Number.MAX_SAFE_INTEGER,
+  });
+  assert.equal(maxSafe.claim('t-p0p-1j', { agentId: 'ag', runId: 'r1' }).leaseId,
+    Number.MAX_SAFE_INTEGER + 1, 'MAX_SAFE_INTEGER 本身仍是合法起点');
+});
+
 // ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failed.length} failed`);
