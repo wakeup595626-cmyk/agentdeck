@@ -66,4 +66,19 @@ console.log('\n=== 6) 无匹配能力：没人有 quantum 标签 ===');
 const noRoute = orc.handleMessage(createTask({ taskId: 'task-quantum-003', content: '做量子模拟', requiredTags: ['quantum'] }));
 console.log(`route -> routed=${noRoute.routed} claimed=${noRoute.claimed} reason=${noRoute.reason}`);
 
-console.log('\nDemo 完成：重复投递只认领一次、image-gen 路由到 01-claude、无匹配明确未路由。');
+console.log('\n=== 7) 六类能力场景：硬门槛、关键词、内容匹配与稳定决胜 ===');
+const scenarios = [
+  { name: '代码', taskId: 'task-code-004', content: '写代码并修复 bug', requiredTags: ['code'] },
+  { name: '审查', taskId: 'task-review-005', content: '审查代码的 review 问题', requiredTags: ['review'] },
+  { name: '文档', taskId: 'task-docs-006', content: '写一份使用文档', requiredTags: ['docs'] },
+  { name: '数据', taskId: 'task-data-007', content: '整理数据表格', requiredTags: ['data'] },
+  { name: '读图', taskId: 'task-image-read-008', content: '看图并描述截图内容', requiredTags: ['image-read'] },
+  { name: '关键词', taskId: 'task-keyword-009', content: '帮我画图', keywords: ['画图'] },
+];
+
+for (const scenario of scenarios) {
+  const routed = orc.handleMessage(createTask(scenario));
+  console.log(`${scenario.name} -> routed=${routed.routed} agent=${routed.agentId ?? '-'} score=${routed.score ?? '-'} reason=${routed.reason ?? 'claimed-ok'}`);
+}
+
+console.log('\nDemo 完成：重复投递只认领一次、六类能力正确路由、无匹配明确未路由。');

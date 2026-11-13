@@ -151,4 +151,111 @@ test('orchestrator: 同一 taskId 新 message id 再投，不会产生第二个�
   assert.equal(second.holder, 'a-code');
 });
 
+test('routing: requiredTags 是硬门槛，关键词和内容高分也不能越过硬门槛', () => {
+  const registry = new AgentRegistry();
+  registry.register(createRegister({
+    agentId: 'a-keyword-only',
+    capabilities: ['code'],
+    keywords: ['生成图片', '活动海报', '图片'],
+  }));
+  registry.register(createRegister({
+    agentId: 'a-image',
+    capabilities: ['image-gen'],
+  }));
+
+  const route = registry.route(createTask({
+    taskId: 't-routing-hard-gate',
+    content: '生成图片：一张活动海报',
+    requiredTags: ['image-gen'],
+    keywords: ['生成图片', '活动海报', '图片'],
+  }));
+
+  assert.equal(route.routed, true);
+  assert.equal(route.agentId, 'a-image');
+});
+
+test('routing: 多个 requiredTags 必须全部具备', () => {
+  const registry = new AgentRegistry();
+  registry.register(createRegister({ agentId: 'a-code', capabilities: ['code'] }));
+  registry.register(createRegister({ agentId: 'a-image', capabilities: ['image-gen'] }));
+  registry.register(createRegister({ agentId: 'a-both', capabilities: ['image-gen', 'code'] }));
+
+  const route = registry.route(createTask({
+    taskId: 't-routing-multi-tags',
+    content: '生成图片并写代码',
+    requiredTags: ['code', 'image-gen'],
+  }));
+
+  assert.equal(route.routed, true);
+  assert.equal(route.agentId, 'a-both');
+  assert.deepEqual(
+    route.candidates.map((candidate) => candidate.agentId),
+    ['a-both'],
+  );
+});
+
+test('routing: 标签和关键词统一大小写并忽略空白', () => {
+  const registry = new AgentRegistry();
+  registry.register(createRegister({
+    agentId: 'a-normalized',
+    capabilities: [' IMAGE-GEN '],
+    keywords: [' Generate Image '],
+  }));
+
+  const route = registry.route(createTask({
+    taskId: 't-routing-normalized',
+    content: 'GENERATE IMAGE',
+    requiredTags: ['Image-Gen'],
+    keywords: ['generate image'],
+  }));
+
+  assert.equal(route.routed, true);
+  assert.equal(route.agentId, 'a-normalized');
+  assert.ok(route.reasons.includes('requiredTag:image-gen'));
+  assert.ok(route.reasons.includes('keyword:generate image'));
+});
+
+test('routing: 明确关键词命中优先于仅内容命中', () => {
+  const registry = new AgentRegistry();
+  registry.register(createRegister({
+    agentId: 'a-explicit-keyword',
+    capabilities: ['docs'],
+    keywords: ['写文档'],
+  }));
+  registry.register(createRegister({
+    agentId: 'a-content-only',
+    capabilities: ['write-docs'],
+  }));
+
+  const route = registry.route(createTask({
+    taskId: 't-routing-explicit-keyword',
+    content: '写文档',
+    keywords: ['写文档'],
+  }));
+
+  assert.equal(route.routed, true);
+  assert.equal(route.agentId, 'a-explicit-keyword');
+  assert.ok(route.score >= 5);
+});
+
+test('routing: 同分时按注册顺序稳定选择', () => {
+  const registry = new AgentRegistry();
+  registry.register(createRegister({ agentId: 'a-first', capabilities: ['code'] }));
+  registry.register(createRegister({ agentId: 'a-second', capabilities: ['code'] }));
+
+  const firstRoute = registry.route(createTask({
+    taskId: 't-routing-stable-1',
+    content: 'code',
+    requiredTags: ['code'],
+  }));
+  const secondRoute = registry.route(createTask({
+    taskId: 't-routing-stable-2',
+    content: 'code',
+    requiredTags: ['code'],
+  }));
+
+  assert.equal(firstRoute.agentId, 'a-first');
+  assert.equal(secondRoute.agentId, firstRoute.agentId);
+});
+
 console.log(`\nAll ${passed} tests passed.`);
