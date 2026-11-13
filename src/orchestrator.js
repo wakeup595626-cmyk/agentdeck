@@ -44,11 +44,12 @@ export class Orchestrator {
 
   handleHeartbeat(msg) {
     const hb = this.registry.heartbeat(msg.agentId);
-    // 顺带续租该 agent 持有的全部未过期 claim——活着就别让租约掉
+    // 顺带续租该 agent 持有的全部未过期 claim——活着就别让租约掉。
+    // 续租要带 runId：同一 agent 的另一个进程不能替当前持有者续命（P0-1）。
     const renewed = [];
     for (const claim of this.dedupe.claims.values()) {
       if (claim.agentId === msg.agentId && claim.status === 'claimed') {
-        const r = this.dedupe.renew(claim.taskId, msg.agentId);
+        const r = this.dedupe.renew(claim.taskId, { agentId: msg.agentId, runId: msg.runId ?? null });
         if (r.renewed) renewed.push(claim.taskId);
       }
     }
@@ -56,12 +57,17 @@ export class Orchestrator {
   }
 
   /**
-   * 任务处理管线：消息去重 -> 能力路由 -> claim 认领。
-   * 任何一步不过都明确返回原因，绝不让第二个 agent 重复执行同一任务。
+   * 任务处理管线：能力路由 -> claim 认领 -> 记消息已见。
+   *
+   * 去重标记的位置很关键（P0-2）：必须放在「真的有人认领了」之后。
+   * 旧实现在第一步就 markSeen，于是没路由成功（no-matching-agent）或认领失败
+   * 的消息也被记为已见，传输层重投时被判 duplicate-message 永久丢弃——而
+   * 「agent 后上线」正是本项目要处理的情况。
+   * 现在只有认领成功才记；没成功的，重投时还能再走一遍。
    */
   handleTask(msg) {
-    // 1) 消息级去重：同一个 message id 第二次进来直接跳过
-    if (!this.dedupe.markSeen(msg.id)) {
+    // 0) 消息级去重：之前已成功处理过的同一 message id，直接跳过
+    if (this.dedupe.hasSeen(msg.id)) {
       return {
         ok: true, type: 'task', taskId: msg.taskId,
         duplicate: true, routed: false, claimed: false,
@@ -69,7 +75,7 @@ export class Orchestrator {
       };
     }
 
-    // 2) 已经完成的任务，迟到投递不再执行
+    // 1) 已经完成的任务，迟到投递不再执行
     if (this.dedupe.isDone(msg.taskId)) {
       return {
         ok: true, type: 'task', taskId: msg.taskId,
@@ -78,9 +84,8 @@ export class Orchestrator {
       };
     }
 
-    // 2.5) 同一 taskId 已被认领（哪怕持有者就是将被路由到的那个）：
-    // 这是一次重复的任务投递，不是续租——续租走 heartbeat / tryClaim。
-    // 直接跳过，保证「同一任务只执行一次」在编排入口就成立。
+    // 2) 同一 taskId 已被认领：这是一次重复的任务投递，直接跳过，
+    //    保证「同一任务只执行一次」在编排入口就成立。
     const existing = this.dedupe.getClaim(msg.taskId);
     if (existing && existing.status === 'claimed') {
       return {
@@ -102,7 +107,10 @@ export class Orchestrator {
     }
 
     // 4) 给路由到的 agent 认领（任务级防撞车）
-    const claim = this.dedupe.claim(msg.taskId, route.agentId);
+    const claim = this.dedupe.claim(msg.taskId, {
+      agentId: route.agentId,
+      runId: msg.runId ?? null,
+    });
     if (!claim.claimed) {
       return {
         ok: true, type: 'task', taskId: msg.taskId,
@@ -111,6 +119,10 @@ export class Orchestrator {
         reason: claim.reason,
       };
     }
+
+    // 5) 只在真正认领成功之后，才把这条消息记为已处理。
+    this.dedupe.markSeen(msg.id);
+
     return {
       ok: true, type: 'task', taskId: msg.taskId,
       duplicate: false, routed: true, claimed: true,
@@ -120,7 +132,7 @@ export class Orchestrator {
   }
 
   handleResult(msg) {
-    const done = this.dedupe.complete(msg.taskId, msg.agentId);
+    const done = this.dedupe.complete(msg.taskId, { agentId: msg.agentId, runId: msg.runId ?? null });
     return {
       ok: done.completed, type: 'result', taskId: msg.taskId, agentId: msg.agentId,
       status: msg.status, ...(done.completed ? {} : { reason: done.reason, holder: done.holder }),
@@ -130,9 +142,10 @@ export class Orchestrator {
   /**
    * 广播场景的直认领入口：群里每个 agent 都会收到同一条任务，
    * 各自来 tryClaim，只有一个能成功——这就是防撞车的落点。
+   * 传 {agentId, runId} 以区分同一 agent 的不同进程（P0-1）。
    */
-  tryClaim(taskId, agentId, opts) {
-    return this.dedupe.claim(taskId, agentId, opts);
+  tryClaim(taskId, agentIdOrIdentity, opts) {
+    return this.dedupe.claim(taskId, agentIdOrIdentity, opts);
   }
 
   getClaim(taskId) {

@@ -69,7 +69,23 @@
   ```
 
   持有者靠 `heartbeat` 续租；持有者死了、租约到期，别人自动接管，任务不卡死。
-  持有者自己重复 claim 是幂等续租，不算撞车。
+
+  **持有者的身份是 `(agentId, runId)`，不是 `agentId`。** 同一台机器上同一个
+  agent 可能跑着多个进程（最典型：Pachat listener 和定时巡检共用同一个
+  `agentId`），如果只认 `agentId`，第二个进程 claim 时会命中「自己重复认领 =
+  幂等续租」，两个进程都会执行——防撞车当场失效。`runId` 在进程启动时生成，
+  随 `claim` / `renew` / `complete` 一起传：
+
+  ```js
+  orc.tryClaim('task-1', { agentId: '01-claude', runId: 'pid-4242' });
+  ```
+
+  同一个执行者重复 claim 才是幂等续租；不同 `runId` 一律拒绝（`already-claimed`）。
+  只传 `agentId` 时按 **agent 级**租约处理（只比 `agentId`），适用于中心编排器
+  替某 agent 认领、拿不到对方 `runId` 的场景——这种租约挡不住同 agent 内的进程撞车。
+
+  `leaseId` 来自单调计数器，`release` 之后重新 claim 也不会回退，可安全用作
+  下游的 fencing token。
 
 ### 2. 能力注册与路由（`src/registry.js`）
 
@@ -88,7 +104,9 @@
 
 ```bash
 node examples/demo.js   # 演示：3 台服务器 6 个 agent、重复投递只认领一次、按能力路由
-npm test                # 或 node test/run-tests.js
+npm test                # 单元测试 + P0 回归用例（node test/run-tests.js && node test/repro-p0.js）
+npm run test:unit       # 只跑单元测试
+npm run test:p0         # 只跑 P0 回归用例
 ```
 
 把编排器嵌进自己的 adapter：
@@ -121,6 +139,7 @@ src/registry.js         # AgentRegistry：能力注册表 + 标签/关键词路�
 src/orchestrator.js     # Orchestrator：串起三者，handleMessage 分发处理
 examples/demo.js        # 3 服务器 × (Claude Code + Codex) 模拟演示
 test/run-tests.js       # node:assert 断言测试（去重/过期接管/路由命中/无匹配）
+test/repro-p0.js        # P0 回归用例：进程级 claim、去重时机、leaseId 单调、内存有界、complete 鉴权
 ```
 
 ## MVP 范围与路线图
