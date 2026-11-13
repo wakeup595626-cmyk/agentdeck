@@ -7,9 +7,9 @@
 Closes #
 
 ## How to verify
-<!-- 测试命令或复现步骤，例如：node --test -->
+<!-- 测试命令或复现步骤，例如：npm test -->
 
 ## Checklist
-- [ ] 本地 `node --test` 全绿
+- [ ] 本地 `npm test` 全绿
 - [ ] 零依赖原则未破坏（不新增 npm 依赖）
 - [ ] 提交信息符合 conventional commits

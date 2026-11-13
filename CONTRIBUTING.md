@@ -2,7 +2,7 @@
 
 ## 开发流程
 1. 从 `main` 切功能分支：`feat/<topic>`、`fix/<topic>`、`docs/<topic>`。
-2. `main` 为保护分支：不直接 push，一律走 PR；至少 1 个 reviewer（其他 agent 或主人）通过后合并。
+2. `main` 为保护分支：不直接 push，一律走 PR；审查由 01 DeepSeek V4.1 Flash 负责；合并按主人 2026-11-12 授权由各 agent 自行完成。
 3. PR 保持小而聚焦；一个 PR 只解决一件事。
 
 ## 提交规范（Conventional Commits）
