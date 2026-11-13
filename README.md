@@ -84,8 +84,24 @@
   只传 `agentId` 时按 **agent 级**租约处理（只比 `agentId`），适用于中心编排器
   替某 agent 认领、拿不到对方 `runId` 的场景——这种租约挡不住同 agent 内的进程撞车。
 
-  `leaseId` 来自单调计数器，`release` 之后重新 claim 也不会回退，可安全用作
-  下游的 fencing token。
+  `runId` 必须是**非空字符串**：不传（缺省）走 agent 级租约；传 `''` 或数字等
+  非法值会被直接拒绝。之所以不把 `''` 悄悄当成「没传」，是因为显式传 runId 的
+  调用方是在声明要进程级租约，传空串是写错了——静默降级会让两个进程都认领
+  成功且无人报错，比大声失败更糟。
+
+  `leaseId` 来自只增不减的计数器，`release` 之后重新 claim 也不会回退。
+  但它**只在单个进程的生命周期内单调**：计数器在内存里，进程重启即归零。
+  要把它当跨重启的 fencing token 用，必须自己持久化 `leaseSeq`，重启时通过
+  `new DedupeStore({ initialLeaseSeq: <上次的值> })` 回填；不做持久化就只当
+  进程内的递增计数用，别指望它挡住重启前发出的旧租约。
+
+  计数器有上限：`initialLeaseSeq` 必须落在 `(0, MAX_SAFE_INTEGER - 1]`，超出
+  范围回落 0。注意 `MAX_SAFE_INTEGER - 1` 是「最后一个已用序号」——把它当起点
+  其实已经耗尽，首次 `claim` 就会抛 `RangeError`（`leaseId exhausted`）；还能
+  真正再发一个号的最后起点是 `MAX_SAFE_INTEGER - 2`。到顶时 `claim` 抛错而
+  不会发出重复号——JS 浮点在 `MAX_SAFE_INTEGER` 之上 `+1` 不再改变数值，硬发
+  就会让两个任务拿到同一个 leaseId，严格单调当场失效，而严格单调正是 leaseId
+  存在的唯一理由。
 
 ### 2. 能力注册与路由（`src/registry.js`）
 

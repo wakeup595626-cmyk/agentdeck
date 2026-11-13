@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import { Orchestrator } from '../src/orchestrator.js';
 import { DedupeStore } from '../src/dedupe.js';
-import { createRegister, createTask } from '../src/protocol.js';
+import { createRegister, createTask, validateMessage } from '../src/protocol.js';
 
 let passed = 0;
 const failed = [];
@@ -230,6 +230,175 @@ test('P0-5b 持有有效 claim 的 agent 正常交结果', () => {
   const r = d.complete('t-p0-5b', { agentId: 'a', runId: 'r1' });
   assert.equal(r.completed, true);
   assert.equal(d.isDone('t-p0-5b'), true);
+});
+
+// ---------------------------------------------------------------------------
+// ⑥ runId 语义：空串 / 非字符串不能被当成有效进程身份（P0'-2）
+//
+// 背景：P0-1 把身份改成 (agentId, runId)，但 normalizeIdentity 只做 `?? null`，
+// 于是空串被原样保留。两个进程若都传 runId:''，在 #isSameRunner 里 '' === ''
+// 成立，第二个进程被当成「自己重复认领 = 幂等续租」，拿到 claimed:true ——
+// P0-1 要挡的撞车原样复现。
+//
+// 修复方向：'' 与非字符串一律在边界抛错（大声失败），而不是悄悄降级成
+// agent 级租约——降级会让两个进程都认领成功且无人报错，比失败更糟。
+
+test("P0'-2 传空串 runId 必须抛错，不能静默降级成 agent 级租约", () => {
+  const d = new DedupeStore({ leaseMs: 60_000, now: () => 1_000_000 });
+  assert.throws(
+    () => d.claim('t-p0p-2a', { agentId: 'ag', runId: '' }),
+    /runId/,
+    '空串 runId 应抛错：两个进程都传 "" 会互相认同，防撞车失效',
+  );
+  // 而且不得留下任何 claim 记录
+  assert.equal(d.getClaim('t-p0p-2a'), null, '抛错时不得留下半成品 claim');
+});
+
+test("P0'-2b 缺省 runId 仍是合法的 agent 级租约（兼容旧签名）", () => {
+  const d = new DedupeStore({ leaseMs: 60_000, now: () => 1_000_000 });
+  const c = d.claim('t-p0p-2b', { agentId: 'ag' });
+  assert.equal(c.claimed, true, '不传 runId 应走 agent 级租约');
+  assert.equal(c.runId, null);
+  // agent 级租约下，同 agent 的再次 claim 是幂等续租
+  const renewed = d.claim('t-p0p-2b', { agentId: 'ag' });
+  assert.equal(renewed.renewed, true);
+});
+
+test("P0'-2c 非字符串 runId 必须被拒绝，而不是静默接受", () => {
+  const d = new DedupeStore({ leaseMs: 60_000, now: () => 1_000_000 });
+  assert.throws(
+    () => d.claim('t-p0p-2c', { agentId: 'ag', runId: 123 }),
+    /runId/,
+    '数字 runId 应抛错，避免 123 与 "123" 混淆',
+  );
+});
+
+test("P0'-2d 协议层同样拒掉非法 runId", () => {
+  const badType = validateMessage({ id: 'm1', type: 'task', taskId: 't1', runId: 123 });
+  assert.equal(badType.ok, false, '非字符串 runId 应在协议校验被拒');
+  assert.ok(badType.errors.some((e) => e.includes('runId')));
+
+  const missing = validateMessage({ id: 'm2', type: 'task', taskId: 't2' });
+  assert.equal(missing.ok, true, '不传 runId 必须仍然合法');
+
+  const good = validateMessage({ id: 'm3', type: 'task', taskId: 't3', runId: 'pid-1' });
+  assert.equal(good.ok, true, '合法 runId 应通过');
+
+  const empty = validateMessage({ id: 'm4', type: 'task', taskId: 't4', runId: '' });
+  assert.equal(empty.ok, false, '空串 runId 应在协议校验被拒（不得静默降级）');
+  assert.ok(empty.errors.some((e) => e.includes('runId')));
+
+  // heartbeat / result 里的 msg.runId ?? null 会直接流进 renew/complete，
+  // 协议层必须在这里就把空串挡住，否则编排器路径仍会绕过。
+  const hb = validateMessage({ id: 'm5', type: 'heartbeat', agentId: 'a', runId: '' });
+  assert.equal(hb.ok, false, 'heartbeat 的空串 runId 也应被拒');
+  const res = validateMessage({ id: 'm6', type: 'result', taskId: 't5', agentId: 'a', runId: '' });
+  assert.equal(res.ok, false, 'result 的空串 runId 也应被拒');
+});
+
+// ---------------------------------------------------------------------------
+// ⑦ leaseId 单调性：跨进程重启不得回退（P0'-1）
+//
+// 背景：leaseSeq 是内存计数器，进程重启即归零。README 与 dedupe.js 都声明
+// 「leaseId 可安全用作下游 fencing token」，但 fencing token 的全部意义是
+// 单调递增，回退等于让下游接受已作废的旧租约写入。
+//
+// 修复方向：把序号来源做成可注入 / 可持久化（这里是构造参数 initialLeaseSeq
+// 或注入 nextLeaseId），重启时从上次的值续上，而不是从 0 重来。
+
+test("P0'-1 进程重启后 leaseId 必须从上次的值继续，不得回退", () => {
+  const clock = { t: 1_000_000 };
+  const first = new DedupeStore({ leaseMs: 60_000, now: () => clock.t });
+  first.claim('t-p0p-1a', { agentId: 'ag', runId: 'r1' });
+  first.claim('t-p0p-1b', { agentId: 'ag', runId: 'r1' });
+  const lastBefore = first.claim('t-p0p-1c', { agentId: 'ag', runId: 'r1' }).leaseId;
+  assert.equal(lastBefore, 3, '前置：三次认领应得到 1,2,3');
+
+  // 模拟崩溃重启：新实例，但序号从上一个实例的最后值续上
+  const restarted = new DedupeStore({ leaseMs: 60_000, now: () => clock.t, initialLeaseSeq: lastBefore });
+  const after = restarted.claim('t-p0p-1d', { agentId: 'ag', runId: 'r2' });
+  assert.ok(
+    after.leaseId > lastBefore,
+    `重启后第一个 leaseId(${after.leaseId}) 必须大于重启前最后一个(${lastBefore})`,
+  );
+});
+
+test("P0'-1b leaseId 序号可以被读出，供外部持久化", () => {
+  const d = new DedupeStore({ leaseMs: 60_000, now: () => 1_000_000 });
+  d.claim('t-p0p-1e', { agentId: 'ag', runId: 'r1' });
+  d.claim('t-p0p-1f', { agentId: 'ag', runId: 'r1' });
+  assert.equal(d.leaseSeq, 2, 'leaseSeq 应可直接读出，供调用方持久化后回填');
+});
+
+// 复审（MiMo #205）要求补齐 initialLeaseSeq 的非法边界：0 / 负数 / 非整数
+// 都必须回落 0，首个 leaseId=1；合法值则从其后续上，不回退也不跳号。
+test("P0'-1c initialLeaseSeq 非法值回落 0，合法值精确续号", () => {
+  const clock = () => 1_000_000;
+  const bad = [0, -1, -100, 1.5, NaN, Infinity, '7', null, {}];
+  for (const value of bad) {
+    const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: value });
+    const first = d.claim(`t-p0p-1g-${String(value)}`, { agentId: 'ag', runId: 'r1' });
+    assert.equal(first.leaseId, 1, `initialLeaseSeq=${String(value)} 应回落 0，首个 leaseId 为 1`);
+  }
+
+  // 合法起点：正好续上，不跳号（7 -> 8）
+  const resumed = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: 7 });
+  assert.equal(resumed.claim('t-p0p-1h', { agentId: 'ag', runId: 'r1' }).leaseId, 8);
+});
+
+// 超过 MAX_SAFE_INTEGER 的起点必须拒绝：那儿 ++ 不再改变数值（1e20 + 1 === 1e20），
+// 计数器会静默停住，单调性失效。这正是 leaseId 存在的唯一理由，所以宁可回落 0。
+//
+// 复审（MiMo #207）指出光挡起点不够：合法起点 MAX_SAFE_INTEGER 之后，
+// 连续两次 claim 都会得到 9007199254740992（+1 不再改变数值），照样是重复号。
+// 所以上限收到 MAX_SAFE_INTEGER - 1，并且计数器发到顶时必须抛错而不是发重复号。
+test("P0'-1d initialLeaseSeq 必须在安全范围内：超过上限回落 0", () => {
+  const clock = () => 1_000_000;
+  const overCap = [1e20, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE];
+  for (const value of overCap) {
+    const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: value });
+    assert.equal(d.leaseSeq, 0, `initialLeaseSeq=${value} 超过上限应回落 0`);
+    assert.equal(d.claim(`t-p0p-1i-${value}`, { agentId: 'ag', runId: 'r1' }).leaseId, 1);
+  }
+
+  // 前置确认这个前提属实，免得用例变成空转
+  assert.equal(1e20 + 1, 1e20, '前提：超过 MAX_SAFE_INTEGER 后 ++ 不再改变数值');
+  assert.equal(Number.MAX_SAFE_INTEGER + 1 + 1, Number.MAX_SAFE_INTEGER + 1,
+    '前提：从 MAX_SAFE_INTEGER 起步会连发重复号');
+});
+
+test("P0'-1e 上限内最后一个还能发号的起点可用；到顶后必须抛错、不得发重复号", () => {
+  const clock = () => 1_000_000;
+  // MAX_LEASE_SEQ = MAX_SAFE_INTEGER - 1 是「最后一个已用序号」的上限。
+  // 因此「还能再发一个号」的最后一个起点是 MAX_LEASE_SEQ - 1，即
+  // MAX_SAFE_INTEGER - 2：它发出 MAX_LEASE_SEQ 之后计数器耗尽。
+  const maxSeq = Number.MAX_SAFE_INTEGER - 1;
+  const lastUsableStart = maxSeq - 1;
+
+  const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: lastUsableStart });
+  const last = d.claim('t-p0p-1k', { agentId: 'ag', runId: 'r1' }).leaseId;
+  assert.equal(last, maxSeq, '起点 MAX_SAFE_INTEGER-2 应能发出最后一个合法 leaseId = MAX_SAFE_INTEGER-1');
+  assert.equal(Number.isSafeInteger(last), true, '发出的 leaseId 必须是安全整数');
+
+  // 到顶之后再发：必须大声失败，而不是发一个和上一个相等的号
+  assert.throws(
+    () => d.claim('t-p0p-1l', { agentId: 'ag', runId: 'r1' }),
+    /leaseId exhausted/,
+    '计数器耗尽时必须抛 RangeError，不能发重复 leaseId',
+  );
+  assert.equal(d.leaseSeq, maxSeq, '抛错后计数器不得再变');
+  assert.equal(d.getClaim('t-p0p-1l'), null, '抛错时不得留下半成品 claim');
+
+  // 起点 = MAX_LEASE_SEQ 本身：是合法的「最后已用序号」，但已经耗尽，
+  // 首次 claim 就应该抛错——它并不"还能再发一个号"。
+  const exhausted = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: maxSeq });
+  assert.equal(exhausted.leaseSeq, maxSeq, 'MAX_SAFE_INTEGER-1 作为起点应被接受（合法已用序号）');
+  assert.throws(
+    () => exhausted.claim('t-p0p-1m', { agentId: 'ag', runId: 'r1' }),
+    /leaseId exhausted/,
+    '从 MAX_SAFE_INTEGER-1 起步已无号可发，首次 claim 就必须抛错',
+  );
+  assert.equal(exhausted.getClaim('t-p0p-1m'), null);
 });
 
 // ---------------------------------------------------------------------------

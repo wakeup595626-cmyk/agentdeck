@@ -79,6 +79,18 @@ export function validateMessage(msg) {
     return { ok: false, errors };
   }
 
+  // runId 在边界上就挡掉（P0'-2）：可选，可以缺省，但一旦出现就必须是
+  // 非空字符串。空串会让两个进程在 DedupeStore 里互相认同（'' === ''），
+  // 等于防撞车失效；非字符串则会有 123 与 '123' 之类的隐式相等风险。
+  // 与 normalizeIdentity 的规则一致：缺省/null 走 agent 级租约，'' 和非字符串
+  // 一律拒绝。不能让 '' 通过校验——heartbeat/result 里的 `msg.runId ?? null`
+  // 会把它带进 renew/complete 的路径，静默降级正是要堵的那个洞。
+  if (msg.runId !== undefined && msg.runId !== null) {
+    if (typeof msg.runId !== 'string' || msg.runId === '') {
+      errors.push('runId must be a non-empty string when provided');
+    }
+  }
+
   switch (msg.type) {
     case 'register':
       if (!msg.agentId) errors.push('register.agentId is required');
