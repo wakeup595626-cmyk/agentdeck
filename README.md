@@ -96,9 +96,11 @@
   进程内的递增计数用，别指望它挡住重启前发出的旧租约。
 
   计数器有上限：`initialLeaseSeq` 必须落在 `(0, MAX_SAFE_INTEGER - 1]`，超出
-  范围回落 0。发到顶时 `claim` 抛 `RangeError`（`leaseId exhausted`），不会
-  发出重复号——JS 浮点在 `MAX_SAFE_INTEGER` 之上 `+1` 不再改变数值，硬发就会
-  让两个任务拿到同一个 leaseId，严格单调当场失效，而严格单调正是 leaseId
+  范围回落 0。注意 `MAX_SAFE_INTEGER - 1` 是「最后一个已用序号」——把它当起点
+  其实已经耗尽，首次 `claim` 就会抛 `RangeError`（`leaseId exhausted`）；还能
+  真正再发一个号的最后起点是 `MAX_SAFE_INTEGER - 2`。到顶时 `claim` 抛错而
+  不会发出重复号——JS 浮点在 `MAX_SAFE_INTEGER` 之上 `+1` 不再改变数值，硬发
+  就会让两个任务拿到同一个 leaseId，严格单调当场失效，而严格单调正是 leaseId
   存在的唯一理由。
 
 ### 2. 能力注册与路由（`src/registry.js`）

@@ -367,14 +367,17 @@ test("P0'-1d initialLeaseSeq 必须在安全范围内：超过上限回落 0", (
     '前提：从 MAX_SAFE_INTEGER 起步会连发重复号');
 });
 
-test("P0'-1e 上限内最后一个合法起点可用，且发到顶后必须抛错、不得发重复号", () => {
+test("P0'-1e 上限内最后一个还能发号的起点可用；到顶后必须抛错、不得发重复号", () => {
   const clock = () => 1_000_000;
+  // MAX_LEASE_SEQ = MAX_SAFE_INTEGER - 1 是「最后一个已用序号」的上限。
+  // 因此「还能再发一个号」的最后一个起点是 MAX_LEASE_SEQ - 1，即
+  // MAX_SAFE_INTEGER - 2：它发出 MAX_LEASE_SEQ 之后计数器耗尽。
   const maxSeq = Number.MAX_SAFE_INTEGER - 1;
+  const lastUsableStart = maxSeq - 1;
 
-  // MAX_SAFE_INTEGER - 1 是合法起点，可以再发一个号
-  const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: maxSeq - 1 });
+  const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: lastUsableStart });
   const last = d.claim('t-p0p-1k', { agentId: 'ag', runId: 'r1' }).leaseId;
-  assert.equal(last, maxSeq, 'MAX_SAFE_INTEGER-1 起点应能发出一个合法 leaseId');
+  assert.equal(last, maxSeq, '起点 MAX_SAFE_INTEGER-2 应能发出最后一个合法 leaseId = MAX_SAFE_INTEGER-1');
   assert.equal(Number.isSafeInteger(last), true, '发出的 leaseId 必须是安全整数');
 
   // 到顶之后再发：必须大声失败，而不是发一个和上一个相等的号
@@ -385,6 +388,17 @@ test("P0'-1e 上限内最后一个合法起点可用，且发到顶后必须抛�
   );
   assert.equal(d.leaseSeq, maxSeq, '抛错后计数器不得再变');
   assert.equal(d.getClaim('t-p0p-1l'), null, '抛错时不得留下半成品 claim');
+
+  // 起点 = MAX_LEASE_SEQ 本身：是合法的「最后已用序号」，但已经耗尽，
+  // 首次 claim 就应该抛错——它并不"还能再发一个号"。
+  const exhausted = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: maxSeq });
+  assert.equal(exhausted.leaseSeq, maxSeq, 'MAX_SAFE_INTEGER-1 作为起点应被接受（合法已用序号）');
+  assert.throws(
+    () => exhausted.claim('t-p0p-1m', { agentId: 'ag', runId: 'r1' }),
+    /leaseId exhausted/,
+    '从 MAX_SAFE_INTEGER-1 起步已无号可发，首次 claim 就必须抛错',
+  );
+  assert.equal(exhausted.getClaim('t-p0p-1m'), null);
 });
 
 // ---------------------------------------------------------------------------
