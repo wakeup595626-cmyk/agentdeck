@@ -348,20 +348,43 @@ test("P0'-1c initialLeaseSeq 非法值回落 0，合法值精确续号", () => {
 
 // 超过 MAX_SAFE_INTEGER 的起点必须拒绝：那儿 ++ 不再改变数值（1e20 + 1 === 1e20），
 // 计数器会静默停住，单调性失效。这正是 leaseId 存在的唯一理由，所以宁可回落 0。
-test("P0'-1d initialLeaseSeq 超过安全整数时必须拒绝，不能接受一个不再递增的起点", () => {
+//
+// 复审（MiMo #207）指出光挡起点不够：合法起点 MAX_SAFE_INTEGER 之后，
+// 连续两次 claim 都会得到 9007199254740992（+1 不再改变数值），照样是重复号。
+// 所以上限收到 MAX_SAFE_INTEGER - 1，并且计数器发到顶时必须抛错而不是发重复号。
+test("P0'-1d initialLeaseSeq 必须在安全范围内：超过上限回落 0", () => {
   const clock = () => 1_000_000;
-  const unsafe = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: 1e20 });
-  assert.equal(unsafe.leaseSeq, 0, '不安全整数应回落 0');
-  const first = unsafe.claim('t-p0p-1i', { agentId: 'ag', runId: 'r1' }).leaseId;
-  assert.equal(first, 1);
+  const overCap = [1e20, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE];
+  for (const value of overCap) {
+    const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: value });
+    assert.equal(d.leaseSeq, 0, `initialLeaseSeq=${value} 超过上限应回落 0`);
+    assert.equal(d.claim(`t-p0p-1i-${value}`, { agentId: 'ag', runId: 'r1' }).leaseId, 1);
+  }
 
   // 前置确认这个前提属实，免得用例变成空转
   assert.equal(1e20 + 1, 1e20, '前提：超过 MAX_SAFE_INTEGER 后 ++ 不再改变数值');
-  const maxSafe = new DedupeStore({
-    leaseMs: 60_000, now: clock, initialLeaseSeq: Number.MAX_SAFE_INTEGER,
-  });
-  assert.equal(maxSafe.claim('t-p0p-1j', { agentId: 'ag', runId: 'r1' }).leaseId,
-    Number.MAX_SAFE_INTEGER + 1, 'MAX_SAFE_INTEGER 本身仍是合法起点');
+  assert.equal(Number.MAX_SAFE_INTEGER + 1 + 1, Number.MAX_SAFE_INTEGER + 1,
+    '前提：从 MAX_SAFE_INTEGER 起步会连发重复号');
+});
+
+test("P0'-1e 上限内最后一个合法起点可用，且发到顶后必须抛错、不得发重复号", () => {
+  const clock = () => 1_000_000;
+  const maxSeq = Number.MAX_SAFE_INTEGER - 1;
+
+  // MAX_SAFE_INTEGER - 1 是合法起点，可以再发一个号
+  const d = new DedupeStore({ leaseMs: 60_000, now: clock, initialLeaseSeq: maxSeq - 1 });
+  const last = d.claim('t-p0p-1k', { agentId: 'ag', runId: 'r1' }).leaseId;
+  assert.equal(last, maxSeq, 'MAX_SAFE_INTEGER-1 起点应能发出一个合法 leaseId');
+  assert.equal(Number.isSafeInteger(last), true, '发出的 leaseId 必须是安全整数');
+
+  // 到顶之后再发：必须大声失败，而不是发一个和上一个相等的号
+  assert.throws(
+    () => d.claim('t-p0p-1l', { agentId: 'ag', runId: 'r1' }),
+    /leaseId exhausted/,
+    '计数器耗尽时必须抛 RangeError，不能发重复 leaseId',
+  );
+  assert.equal(d.leaseSeq, maxSeq, '抛错后计数器不得再变');
+  assert.equal(d.getClaim('t-p0p-1l'), null, '抛错时不得留下半成品 claim');
 });
 
 // ---------------------------------------------------------------------------

@@ -95,6 +95,12 @@
   `new DedupeStore({ initialLeaseSeq: <上次的值> })` 回填；不做持久化就只当
   进程内的递增计数用，别指望它挡住重启前发出的旧租约。
 
+  计数器有上限：`initialLeaseSeq` 必须落在 `(0, MAX_SAFE_INTEGER - 1]`，超出
+  范围回落 0。发到顶时 `claim` 抛 `RangeError`（`leaseId exhausted`），不会
+  发出重复号——JS 浮点在 `MAX_SAFE_INTEGER` 之上 `+1` 不再改变数值，硬发就会
+  让两个任务拿到同一个 leaseId，严格单调当场失效，而严格单调正是 leaseId
+  存在的唯一理由。
+
 ### 2. 能力注册与路由（`src/registry.js`）
 
 打分制，确定性、无随机、同分按注册先后：

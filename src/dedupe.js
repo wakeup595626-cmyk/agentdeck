@@ -24,6 +24,16 @@
 export const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24h
 
 /**
+ * leaseId 的上限（P0'-1）：MAX_SAFE_INTEGER - 1。
+ *
+ * 为什么不是 MAX_SAFE_INTEGER 本身：从它起步的第一个 leaseId 是
+ * 9007199254740992，再 ++ 还是 9007199254740992——两个任务拿到同一个号，
+ * 严格单调当场失效。留一格余量，保证「最后一个合法 leaseId」仍是安全整数，
+ * 且它之后不会再有值。到顶时 #nextLeaseId 抛错，绝不发重复号。
+ */
+export const MAX_LEASE_SEQ = Number.MAX_SAFE_INTEGER - 1;
+
+/**
  * 把旧调用形式 claim(taskId, agentId) 归一成 claim(taskId, {agentId, runId})。
  *
  * runId 的归一规则（P0'-2）：
@@ -82,11 +92,16 @@ export class DedupeStore {
      * 重启保证单调——调用方应当把 leaseSeq 持久化，重启时用 initialLeaseSeq 回填。
      * 不做持久化就等于放弃 fencing 语义，此时 leaseId 只能当进程内的递增计数看。
      *
-     * 用 isSafeInteger 而不是 isInteger：超过 MAX_SAFE_INTEGER 之后 ++ 不再改变
-     * 数值（1e20 + 1 === 1e20），计数器会静默停住，单调性当场失效。宁可回落 0
-     * 也不要接受一个注定不再递增的起点。
+     * 起点必须是 (0, MAX_LEASE_SEQ] 内的安全整数，否则回落 0。上限取
+     * MAX_SAFE_INTEGER - 1 而不是 MAX_SAFE_INTEGER：从后者起步的第一个号是
+     * 9007199254740992，再 ++ 数值不变，会连发重复号（见 MAX_LEASE_SEQ）。
+     * 回落 0 是放弃这段号段，但至少不会假装单调。
      */
-    this.leaseSeq = Number.isSafeInteger(initialLeaseSeq) && initialLeaseSeq > 0 ? initialLeaseSeq : 0;
+    this.leaseSeq = Number.isSafeInteger(initialLeaseSeq)
+      && initialLeaseSeq > 0
+      && initialLeaseSeq <= MAX_LEASE_SEQ
+      ? initialLeaseSeq
+      : 0;
   }
 
   // ---------- 消息级去重 ----------
@@ -131,7 +146,19 @@ export class DedupeStore {
     return !!claim && claim.status === 'done';
   }
 
+  /**
+   * 发下一个 leaseId。严格单调是 fencing token 的全部要求，所以这里必须
+   * 保证「下一个值一定大于上一个」——到了安全整数上限就大声抛错，而不是
+   * 发一个和上一个相等的号（JS 里 9007199254740992 + 1 === 9007199254740992，
+   * 再往上 ++ 全都不再改变数值，会静默发出重复的 leaseId）。
+   */
   #nextLeaseId() {
+    if (this.leaseSeq >= MAX_LEASE_SEQ) {
+      throw new RangeError(
+        `leaseId exhausted: sequence reached ${MAX_LEASE_SEQ} (MAX_SAFE_INTEGER - 1); `
+        + 'refusing to issue a non-increasing leaseId',
+      );
+    }
     return ++this.leaseSeq;
   }
 
